@@ -1,530 +1,318 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
-
-import websocket
-import threading
 import requests
-import json
+import statistics
+import threading
 import time
 
-from datetime import datetime
-
-# ==========================================
-# CONFIG
-# ==========================================
-
-SYMBOL = "BTCUSDT"
-
-TIMEFRAMES = ["1m", "5m"]
-
-UPDATE_INTERVAL = 5
-
-HISTORY_LIMIT = 120
-
-# ==========================================
-# APP
-# ==========================================
-
 app = Flask(__name__)
-
 CORS(app)
-
-# ==========================================
-# GLOBAL
-# ==========================================
 
 market_data = {}
 
-live_price = 0
+SYMBOL = "BTCUSDT"
 
-last_update = 0
+candles_1m = []
+candles_5m = []
+candles_15m = []
 
-histories = {
-    tf: []
-    for tf in TIMEFRAMES
-}
 
-# ==========================================
-# ROUND
-# ==========================================
+# =========================
+# FETCH BINANCE DATA
+# =========================
 
-def r(v):
+def get_klines(interval="1m", limit=100):
+    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit={limit}"
+    response = requests.get(url, timeout=10)
+    data = response.json()
 
-    if v is None:
-        return None
+    closes = []
+    highs = []
+    lows = []
+    volumes = []
 
-    return round(float(v), 2)
+    for k in data:
+        closes.append(float(k[4]))
+        highs.append(float(k[2]))
+        lows.append(float(k[3]))
+        volumes.append(float(k[5]))
 
-# ==========================================
-# LOAD HISTORY
-# ==========================================
+    return closes, highs, lows, volumes
 
-def load_history(interval):
 
-    url = (
-        f"https://api.binance.com/api/v3/klines"
-        f"?symbol={SYMBOL}"
-        f"&interval={interval}"
-        f"&limit=120"
-    )
+# =========================
+# INDICATORS
+# =========================
 
-    data = requests.get(url).json()
-
-    candles = []
-
-    for c in data:
-
-        candles.append({
-
-            "high": float(c[2]),
-            "low": float(c[3]),
-            "close": float(c[4]),
-            "volume": float(c[5])
-        })
-
-    return candles
-
-# ==========================================
-# EMA
-# ==========================================
-
-def ema(values, period):
-
-    if len(values) < period:
+def ema(data, period):
+    if len(data) < period:
         return None
 
     multiplier = 2 / (period + 1)
+    ema_value = sum(data[:period]) / period
 
-    value = sum(values[:period]) / period
+    for price in data[period:]:
+        ema_value = (price - ema_value) * multiplier + ema_value
 
-    for p in values[period:]:
+    return round(ema_value, 2)
 
-        value = ((p - value) * multiplier) + value
 
-    return r(value)
-
-# ==========================================
-# RSI
-# ==========================================
-
-def rsi(values, period=14):
-
-    if len(values) < period + 1:
+def rsi(data, period=14):
+    if len(data) < period + 1:
         return None
 
-    gains = 0
+    gains = []
+    losses = []
 
-    losses = 0
+    for i in range(1, len(data)):
+        diff = data[i] - data[i - 1]
 
-    for i in range(-period, 0):
-
-        diff = values[i] - values[i - 1]
-
-        if diff > 0:
-            gains += diff
+        if diff >= 0:
+            gains.append(diff)
         else:
-            losses += abs(diff)
+            losses.append(abs(diff))
 
-    if losses == 0:
-        return 100
+    avg_gain = sum(gains[-period:]) / period if gains else 0.01
+    avg_loss = sum(losses[-period:]) / period if losses else 0.01
 
-    rs = gains / losses
+    rs = avg_gain / avg_loss
+    rsi_value = 100 - (100 / (1 + rs))
 
-    return r(100 - (100 / (1 + rs)))
+    return round(rsi_value, 2)
 
-# ==========================================
-# ANALYZE
-# ==========================================
 
-def analyze(interval):
+def atr(highs, lows, closes, period=14):
+    trs = []
 
-    candles = histories[interval]
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
 
-    closes = [c["close"] for c in candles]
+        trs.append(tr)
 
-    highs = [c["high"] for c in candles]
+    if len(trs) < period:
+        return None
 
-    lows = [c["low"] for c in candles]
+    return round(sum(trs[-period:]) / period, 2)
 
-    volumes = [c["volume"] for c in candles]
 
-    ema20 = ema(closes, 20)
+# =========================
+# MARKET STRUCTURE
+# =========================
 
-    ema50 = ema(closes, 50)
+def structure(price, ema20, ema50):
+    if ema20 is None or ema50 is None:
+        return "UNKNOWN"
 
-    rsi14 = rsi(closes)
+    if price > ema20 > ema50:
+        return "BULLISH"
 
-    support = min(lows[-20:])
+    if price < ema20 < ema50:
+        return "BEARISH"
 
-    resistance = max(highs[-20:])
+    return "RANGE"
 
-    avg_volume = sum(volumes[-20:]) / 20
 
-    volume_ratio = volumes[-1] / avg_volume
+# =========================
+# SIGNAL ENGINE
+# =========================
 
-    trend = "neutral"
+def signal_logic(price, ema20, ema50, rsi_value):
 
-    if ema20 and ema50:
-
-        if ema20 > ema50:
-            trend = "bullish"
-
-        elif ema20 < ema50:
-            trend = "bearish"
-
-    return {
-
-        "price": r(closes[-1]),
-
-        "ema20": ema20,
-
-        "ema50": ema50,
-
-        "rsi14": rsi14,
-
-        "support": r(support),
-
-        "resistance": r(resistance),
-
-        "volume_ratio": r(volume_ratio),
-
-        "trend": trend
+    signal = {
+        "direction": "neutral",
+        "confidence": 0,
+        "reasons": []
     }
 
-# ==========================================
-# AI ENGINE
-# ==========================================
+    if ema20 and ema50 and rsi_value:
 
-def build_signal(tf5, tf1):
+        # LONG
+        if price > ema20 and ema20 > ema50 and rsi_value > 55:
+            signal["direction"] = "LONG"
+            signal["confidence"] = 78
 
-    long_score = 0
+            signal["reasons"] = [
+                "EMA20 above EMA50",
+                "Bullish momentum",
+                "RSI strong"
+            ]
 
-    short_score = 0
+        # SHORT
+        elif price < ema20 and ema20 < ema50 and rsi_value < 45:
+            signal["direction"] = "SHORT"
+            signal["confidence"] = 76
 
-    reasons = []
+            signal["reasons"] = [
+                "EMA20 below EMA50",
+                "Bearish momentum",
+                "RSI weak"
+            ]
 
-    # 5M TREND
+    return signal
 
-    if tf5["trend"] == "bullish":
 
-        long_score += 30
+# =========================
+# UPDATE ENGINE
+# =========================
 
-        reasons.append("5m bullish")
-
-    elif tf5["trend"] == "bearish":
-
-        short_score += 30
-
-        reasons.append("5m bearish")
-
-    # RSI
-
-    if tf1["rsi14"]:
-
-        if tf1["rsi14"] > 60:
-
-            long_score += 20
-
-            reasons.append("bullish momentum")
-
-        elif tf1["rsi14"] < 40:
-
-            short_score += 20
-
-            reasons.append("bearish momentum")
-
-    # VOLUME
-
-    if tf1["volume_ratio"] > 1.2:
-
-        if tf1["trend"] == "bullish":
-
-            long_score += 20
-
-            reasons.append("bullish volume")
-
-        elif tf1["trend"] == "bearish":
-
-            short_score += 20
-
-            reasons.append("bearish volume")
-
-    # FINAL
-
-    direction = "neutral"
-
-    confidence = 0
-
-    if long_score > short_score:
-
-        confidence = long_score / 100
-
-        if confidence >= 0.60:
-
-            direction = "long"
-
-    elif short_score > long_score:
-
-        confidence = short_score / 100
-
-        if confidence >= 0.60:
-
-            direction = "short"
-
-    return {
-
-        "direction": direction,
-
-        "confidence": r(confidence),
-
-        "long_score": long_score,
-
-        "short_score": short_score,
-
-        "reasons": reasons
-    }
-
-# ==========================================
-# BUILD MARKET
-# ==========================================
-
-def build_market():
+def update_market():
 
     global market_data
-
-    tf5 = analyze("5m")
-
-    tf1 = analyze("1m")
-
-    signal = build_signal(tf5, tf1)
-
-    stop_loss = None
-
-    take_profit = None
-
-    if signal["direction"] == "long":
-
-        stop_loss = tf1["support"]
-
-        risk = live_price - stop_loss
-
-        take_profit = live_price + (risk * 2)
-
-    elif signal["direction"] == "short":
-
-        stop_loss = tf1["resistance"]
-
-        risk = stop_loss - live_price
-
-        take_profit = live_price - (risk * 2)
-
-    market_data = {
-
-        "symbol": SYMBOL,
-
-        "timestamp": datetime.now().isoformat(),
-
-        "live_price": r(live_price),
-
-        "signal": signal,
-
-        "trade_plan": {
-
-            "entry": r(live_price),
-
-            "stop_loss": r(stop_loss),
-
-            "take_profit": r(take_profit)
-        },
-
-        "timeframes": {
-
-            "5m": tf5,
-
-            "1m": tf1
-        }
-    }
-
-# ==========================================
-# SOCKET
-# ==========================================
-
-def on_message(ws, message):
-
-    global live_price
-    global last_update
-
-    payload = json.loads(message)
-
-    if "stream" not in payload:
-        return
-
-    stream = payload["stream"]
-
-    data = payload["data"]
-
-    # PRICE
-
-    if "@miniTicker" in stream:
-
-        live_price = float(data["c"])
-
-    # KLINE
-
-    if "@kline_" in stream:
-
-        candle = data["k"]
-
-        interval = candle["i"]
-
-        if interval not in histories:
-            return
-
-        new_data = {
-
-            "high": float(candle["h"]),
-            "low": float(candle["l"]),
-            "close": float(candle["c"]),
-            "volume": float(candle["v"])
-        }
-
-        if histories[interval]:
-
-            histories[interval][-1] = new_data
-
-        else:
-
-            histories[interval].append(new_data)
-
-        histories[interval] = histories[interval][-HISTORY_LIMIT:]
-
-    # UPDATE
-
-    now = time.time()
-
-    if now - last_update >= UPDATE_INTERVAL:
-
-        build_market()
-
-        last_update = now
-
-# ==========================================
-# SOCKET EVENTS
-# ==========================================
-
-def on_error(ws, error):
-
-    print("ERROR:", error)
-
-def on_close(ws, a, b):
-
-    print("Disconnected Binance")
-
-def on_open(ws):
-
-    print("Connected Binance")
-
-# ==========================================
-# START SOCKET
-# ==========================================
-
-def start_socket():
-
-    streams = [
-
-        f"{SYMBOL.lower()}@miniTicker",
-
-        f"{SYMBOL.lower()}@kline_1m",
-
-        f"{SYMBOL.lower()}@kline_5m"
-    ]
-
-    socket = (
-        "wss://stream.binance.com:9443/stream?streams="
-        + "/".join(streams)
-    )
-
-    ws = websocket.WebSocketApp(
-
-        socket,
-
-        on_open=on_open,
-
-        on_message=on_message,
-
-        on_error=on_error,
-
-        on_close=on_close
-    )
-
-    ws.run_forever()
-
-# ==========================================
-# ENGINE
-# ==========================================
-
-def engine():
-
-    print("\nLOADING AI ENGINE...\n")
-
-    for tf in TIMEFRAMES:
-
-        histories[tf] = load_history(tf)
-
-        print(tf, "READY")
-
-    print("\nSYSTEM ONLINE\n")
 
     while True:
 
         try:
 
-            start_socket()
+            # ========= 1M =========
+
+            closes_1m, highs_1m, lows_1m, volumes_1m = get_klines("1m")
+
+            price = closes_1m[-1]
+
+            ema20_1m = ema(closes_1m, 20)
+            ema50_1m = ema(closes_1m, 50)
+            rsi_1m = rsi(closes_1m)
+            atr_1m = atr(highs_1m, lows_1m, closes_1m)
+
+            support_1m = round(min(lows_1m[-20:]), 2)
+            resistance_1m = round(max(highs_1m[-20:]), 2)
+
+            structure_1m = structure(price, ema20_1m, ema50_1m)
+
+            # ========= 5M =========
+
+            closes_5m, highs_5m, lows_5m, volumes_5m = get_klines("5m")
+
+            ema20_5m = ema(closes_5m, 20)
+            ema50_5m = ema(closes_5m, 50)
+            rsi_5m = rsi(closes_5m)
+
+            structure_5m = structure(price, ema20_5m, ema50_5m)
+
+            # ========= 15M =========
+
+            closes_15m, highs_15m, lows_15m, volumes_15m = get_klines("15m")
+
+            ema20_15m = ema(closes_15m, 20)
+            ema50_15m = ema(closes_15m, 50)
+            rsi_15m = rsi(closes_15m)
+
+            structure_15m = structure(price, ema20_15m, ema50_15m)
+
+            # ========= SIGNAL =========
+
+            signal = signal_logic(
+                price,
+                ema20_1m,
+                ema50_1m,
+                rsi_1m
+            )
+
+            # ========= SESSION =========
+
+            current_hour = time.gmtime().tm_hour
+
+            if 0 <= current_hour < 8:
+                session = "ASIA"
+            elif 8 <= current_hour < 16:
+                session = "LONDON"
+            else:
+                session = "NEW_YORK"
+
+            # ========= MARKET DATA =========
+
+            market_data = {
+
+                "status": "ONLINE",
+
+                "symbol": SYMBOL,
+
+                "live_price": price,
+
+                "market_session": session,
+
+                "signal": signal,
+
+                "timeframes": {
+
+                    "1m": {
+                        "price": price,
+                        "ema20": ema20_1m,
+                        "ema50": ema50_1m,
+                        "rsi14": rsi_1m,
+                        "atr": atr_1m,
+                        "support": support_1m,
+                        "resistance": resistance_1m,
+                        "structure": structure_1m
+                    },
+
+                    "5m": {
+                        "ema20": ema20_5m,
+                        "ema50": ema50_5m,
+                        "rsi14": rsi_5m,
+                        "structure": structure_5m
+                    },
+
+                    "15m": {
+                        "ema20": ema20_15m,
+                        "ema50": ema50_15m,
+                        "rsi14": rsi_15m,
+                        "structure": structure_15m
+                    }
+                },
+
+                "risk_management": {
+                    "max_trades_per_day": 3,
+                    "risk_reward": 2,
+                    "max_daily_loss_percent": 3
+                },
+
+                "warnings": [
+                    "Always use stop loss",
+                    "Avoid over leverage",
+                    "Do not revenge trade"
+                ]
+            }
+
+            print("UPDATED:", price)
+
+            time.sleep(3)
 
         except Exception as e:
+            print("ERROR:", e)
+            time.sleep(5)
 
-            print("SOCKET ERROR:", e)
 
-        print("Reconnect after 5 sec...")
-
-        time.sleep(5)
-
-# ==========================================
-# ROUTES
-# ==========================================
+# =========================
+# API ROUTES
+# =========================
 
 @app.route("/")
-
 def home():
-
     return jsonify({
-
         "status": "ONLINE"
     })
 
+
 @app.route("/market")
-
 def market():
-
     return jsonify(market_data)
 
-# ==========================================
-# MAIN
-# ==========================================
+
+# =========================
+# START ENGINE
+# =========================
+
+threading.Thread(target=update_market, daemon=True).start()
+
+
+# =========================
+# RUN SERVER
+# =========================
 
 if __name__ == "__main__":
-
-    thread = threading.Thread(
-        target=engine
-    )
-
-    thread.daemon = True
-
-    thread.start()
-
-    app.run(
-        host="0.0.0.0",
-        port=8000,
-        threaded=True
-    )
-
+    app.run(host="0.0.0.0", port=5000)
