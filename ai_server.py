@@ -11,54 +11,22 @@ market_data = {
     "status": "STARTING"
 }
 
-SYMBOL = "BTCUSDT"
+prices = []
 
 
 # =========================
-# BYBIT FETCH
+# FETCH BTC PRICE
 # =========================
 
-def get_klines(interval="1", limit=100):
+def fetch_price():
 
-    interval_map = {
-        "1m": "1",
-        "5m": "5",
-        "15m": "15"
-    }
-
-    bybit_interval = interval_map.get(interval, "1")
-
-    url = (
-        f"https://api.bybit.com/v5/market/kline"
-        f"?category=linear"
-        f"&symbol={SYMBOL}"
-        f"&interval={bybit_interval}"
-        f"&limit={limit}"
-    )
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
 
     response = requests.get(url, timeout=10)
 
     data = response.json()
 
-    if data["retCode"] != 0:
-        raise Exception(data["retMsg"])
-
-    candles = data["result"]["list"]
-
-    closes = []
-    highs = []
-    lows = []
-
-    # Bybit trả nến mới nhất trước
-    candles.reverse()
-
-    for c in candles:
-
-        closes.append(float(c[4]))
-        highs.append(float(c[2]))
-        lows.append(float(c[3]))
-
-    return closes, highs, lows
+    return float(data["bitcoin"]["usd"])
 
 
 # =========================
@@ -110,25 +78,7 @@ def rsi(data, period=14):
 
 
 # =========================
-# STRUCTURE
-# =========================
-
-def structure(price, ema20, ema50):
-
-    if ema20 is None or ema50 is None:
-        return "UNKNOWN"
-
-    if price > ema20 > ema50:
-        return "BULLISH"
-
-    if price < ema20 < ema50:
-        return "BEARISH"
-
-    return "RANGE"
-
-
-# =========================
-# SIGNAL ENGINE
+# SIGNAL
 # =========================
 
 def signal_logic(price, ema20, ema50, rsi_value):
@@ -139,150 +89,89 @@ def signal_logic(price, ema20, ema50, rsi_value):
         "reasons": []
     }
 
-    if (
-        price > ema20 and
-        ema20 > ema50 and
-        rsi_value > 55
-    ):
+    if ema20 and ema50 and rsi_value:
 
-        signal["direction"] = "LONG"
-        signal["confidence"] = 78
+        if price > ema20 and ema20 > ema50 and rsi_value > 55:
 
-        signal["reasons"] = [
-            "Bullish EMA alignment",
-            "Strong RSI momentum"
-        ]
+            signal["direction"] = "LONG"
+            signal["confidence"] = 75
 
-    elif (
-        price < ema20 and
-        ema20 < ema50 and
-        rsi_value < 45
-    ):
+            signal["reasons"] = [
+                "Bullish EMA trend",
+                "Strong RSI momentum"
+            ]
 
-        signal["direction"] = "SHORT"
-        signal["confidence"] = 76
+        elif price < ema20 and ema20 < ema50 and rsi_value < 45:
 
-        signal["reasons"] = [
-            "Bearish EMA alignment",
-            "Weak RSI momentum"
-        ]
+            signal["direction"] = "SHORT"
+            signal["confidence"] = 75
+
+            signal["reasons"] = [
+                "Bearish EMA trend",
+                "Weak RSI momentum"
+            ]
 
     return signal
 
 
 # =========================
-# UPDATE ENGINE
+# ENGINE
 # =========================
 
 def update_market():
 
     global market_data
+    global prices
 
     while True:
 
         try:
 
-            # ========= 1M =========
+            price = fetch_price()
 
-            closes_1m, highs_1m, lows_1m = get_klines("1m")
+            prices.append(price)
 
-            price = closes_1m[-1]
+            if len(prices) > 200:
+                prices.pop(0)
 
-            ema20_1m = ema(closes_1m, 20)
-            ema50_1m = ema(closes_1m, 50)
+            ema20 = ema(prices, 20)
+            ema50 = ema(prices, 50)
 
-            rsi_1m = rsi(closes_1m)
+            rsi14 = rsi(prices)
 
-            support_1m = round(min(lows_1m[-20:]), 2)
-            resistance_1m = round(max(highs_1m[-20:]), 2)
+            structure = "RANGE"
 
-            structure_1m = structure(
-                price,
-                ema20_1m,
-                ema50_1m
-            )
+            if ema20 and ema50:
+
+                if price > ema20 > ema50:
+                    structure = "BULLISH"
+
+                elif price < ema20 < ema50:
+                    structure = "BEARISH"
 
             signal = signal_logic(
                 price,
-                ema20_1m,
-                ema50_1m,
-                rsi_1m
+                ema20,
+                ema50,
+                rsi14
             )
-
-            # ========= 5M =========
-
-            closes_5m, highs_5m, lows_5m = get_klines("5m")
-
-            ema20_5m = ema(closes_5m, 20)
-            ema50_5m = ema(closes_5m, 50)
-
-            structure_5m = structure(
-                price,
-                ema20_5m,
-                ema50_5m
-            )
-
-            # ========= 15M =========
-
-            closes_15m, highs_15m, lows_15m = get_klines("15m")
-
-            ema20_15m = ema(closes_15m, 20)
-            ema50_15m = ema(closes_15m, 50)
-
-            structure_15m = structure(
-                price,
-                ema20_15m,
-                ema50_15m
-            )
-
-            # ========= SESSION =========
-
-            current_hour = time.gmtime().tm_hour
-
-            if 0 <= current_hour < 8:
-                session = "ASIA"
-            elif 8 <= current_hour < 16:
-                session = "LONDON"
-            else:
-                session = "NEW_YORK"
-
-            # ========= SAVE =========
 
             market_data = {
 
                 "status": "ONLINE",
 
-                "symbol": SYMBOL,
+                "symbol": "BTCUSD",
 
                 "live_price": price,
 
-                "market_session": session,
-
                 "signal": signal,
 
-                "timeframes": {
+                "market_structure": structure,
 
-                    "1m": {
-                        "price": price,
-                        "ema20": ema20_1m,
-                        "ema50": ema50_1m,
-                        "rsi14": rsi_1m,
-                        "support": support_1m,
-                        "resistance": resistance_1m,
-                        "structure": structure_1m
-                    },
-
-                    "5m": {
-                        "ema20": ema20_5m,
-                        "ema50": ema50_5m,
-                        "structure": structure_5m
-                    },
-
-                    "15m": {
-                        "ema20": ema20_15m,
-                        "ema50": ema50_15m,
-                        "structure": structure_15m
-                    }
+                "indicators": {
+                    "ema20": ema20,
+                    "ema50": ema50,
+                    "rsi14": rsi14
                 },
 
                 "risk_management": {
@@ -293,7 +182,7 @@ def update_market():
                 "warnings": [
                     "Always use stop loss",
                     "Avoid revenge trade",
-                    "Avoid over leverage"
+                    "Do not over leverage"
                 ]
             }
 
