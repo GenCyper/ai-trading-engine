@@ -8,14 +8,14 @@ app = Flask(__name__)
 CORS(app)
 
 market_data = {
-    "status": "LOADING"
+    "status": "STARTING"
 }
 
 SYMBOL = "BTCUSDT"
 
 
 # =========================
-# BINANCE FUTURES API
+# FETCH BINANCE DATA
 # =========================
 
 def get_klines(interval="1m", limit=100):
@@ -26,9 +26,28 @@ def get_klines(interval="1m", limit=100):
 
     data = response.json()
 
-    closes = [float(k[4]) for k in data]
-    highs = [float(k[2]) for k in data]
-    lows = [float(k[3]) for k in data]
+    # Binance API error protection
+    if not isinstance(data, list):
+        raise Exception(f"Binance API Error: {data}")
+
+    if len(data) == 0:
+        raise Exception("Empty candle data")
+
+    closes = []
+    highs = []
+    lows = []
+
+    for k in data:
+
+        if len(k) < 5:
+            continue
+
+        closes.append(float(k[4]))
+        highs.append(float(k[2]))
+        lows.append(float(k[3]))
+
+    if len(closes) == 0:
+        raise Exception("No valid candle data")
 
     return closes, highs, lows
 
@@ -111,8 +130,6 @@ def signal_logic(price, ema20, ema50, rsi_value):
         "reasons": []
     }
 
-    # LONG
-
     if (
         price > ema20 and
         ema20 > ema50 and
@@ -124,10 +141,8 @@ def signal_logic(price, ema20, ema50, rsi_value):
 
         signal["reasons"] = [
             "Bullish EMA alignment",
-            "Strong RSI momentum"
+            "RSI momentum strong"
         ]
-
-    # SHORT
 
     elif (
         price < ema20 and
@@ -140,7 +155,7 @@ def signal_logic(price, ema20, ema50, rsi_value):
 
         signal["reasons"] = [
             "Bearish EMA alignment",
-            "Weak RSI momentum"
+            "RSI momentum weak"
         ]
 
     return signal
@@ -268,14 +283,14 @@ def update_market():
 
                 "warnings": [
                     "Always use stop loss",
-                    "Avoid revenge trade",
-                    "Do not over leverage"
+                    "Do not revenge trade",
+                    "Avoid over leverage"
                 ]
             }
 
             print("UPDATED:", price)
 
-            time.sleep(3)
+            time.sleep(5)
 
         except Exception as e:
 
@@ -286,11 +301,11 @@ def update_market():
 
             print("ERROR:", e)
 
-            time.sleep(5)
+            time.sleep(10)
 
 
 # =========================
-# START BACKGROUND ENGINE
+# START ENGINE
 # =========================
 
 threading.Thread(
@@ -326,4 +341,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000
-)
+            )
