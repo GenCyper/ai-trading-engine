@@ -15,18 +15,44 @@ prices = []
 
 
 # =========================
-# FETCH BTC PRICE
+# FETCH PRICE
 # =========================
 
 def fetch_price():
 
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    urls = [
 
-    response = requests.get(url, timeout=10)
+        "https://api.coindesk.com/v1/bpi/currentprice/BTC.json",
 
-    data = response.json()
+        "https://api.coinbase.com/v2/prices/spot?currency=USD"
+    ]
 
-    return float(data["bitcoin"]["usd"])
+    for url in urls:
+
+        try:
+
+            response = requests.get(url, timeout=10)
+
+            data = response.json()
+
+            # COINDESK
+            if "coindesk" in url:
+
+                price = data["bpi"]["USD"]["rate"]
+
+                price = price.replace(",", "")
+
+                return float(price)
+
+            # COINBASE
+            else:
+
+                return float(data["data"]["amount"])
+
+        except:
+            continue
+
+    raise Exception("All price APIs failed")
 
 
 # =========================
@@ -43,7 +69,9 @@ def ema(data, period):
     ema_value = sum(data[:period]) / period
 
     for price in data[period:]:
-        ema_value = (price - ema_value) * multiplier + ema_value
+        ema_value = (
+            (price - ema_value) * multiplier
+        ) + ema_value
 
     return round(ema_value, 2)
 
@@ -69,19 +97,29 @@ def rsi(data, period=14):
         else:
             losses.append(abs(diff))
 
-    avg_gain = sum(gains[-period:]) / period if gains else 0.01
-    avg_loss = sum(losses[-period:]) / period if losses else 0.01
+    avg_gain = (
+        sum(gains[-period:]) / period
+        if gains else 0.01
+    )
+
+    avg_loss = (
+        sum(losses[-period:]) / period
+        if losses else 0.01
+    )
 
     rs = avg_gain / avg_loss
 
-    return round(100 - (100 / (1 + rs)), 2)
+    return round(
+        100 - (100 / (1 + rs)),
+        2
+    )
 
 
 # =========================
-# SIGNAL
+# SIGNAL ENGINE
 # =========================
 
-def signal_logic(price, ema20, ema50, rsi_value):
+def signal_logic(price, ema20, ema50, rsi14):
 
     signal = {
         "direction": "WAIT",
@@ -89,11 +127,21 @@ def signal_logic(price, ema20, ema50, rsi_value):
         "reasons": []
     }
 
-    if ema20 and ema50 and rsi_value:
+    if (
+        ema20 and
+        ema50 and
+        rsi14
+    ):
 
-        if price > ema20 and ema20 > ema50 and rsi_value > 55:
+        # LONG
+        if (
+            price > ema20 and
+            ema20 > ema50 and
+            rsi14 > 55
+        ):
 
             signal["direction"] = "LONG"
+
             signal["confidence"] = 75
 
             signal["reasons"] = [
@@ -101,9 +149,15 @@ def signal_logic(price, ema20, ema50, rsi_value):
                 "Strong RSI momentum"
             ]
 
-        elif price < ema20 and ema20 < ema50 and rsi_value < 45:
+        # SHORT
+        elif (
+            price < ema20 and
+            ema20 < ema50 and
+            rsi14 < 45
+        ):
 
             signal["direction"] = "SHORT"
+
             signal["confidence"] = 75
 
             signal["reasons"] = [
@@ -164,25 +218,33 @@ def update_market():
 
                 "live_price": price,
 
-                "signal": signal,
-
                 "market_structure": structure,
 
+                "signal": signal,
+
                 "indicators": {
+
                     "ema20": ema20,
+
                     "ema50": ema50,
+
                     "rsi14": rsi14
                 },
 
                 "risk_management": {
+
                     "max_trades_per_day": 3,
+
                     "risk_reward": 2
                 },
 
                 "warnings": [
+
                     "Always use stop loss",
+
                     "Avoid revenge trade",
-                    "Do not over leverage"
+
+                    "Avoid over leverage"
                 ]
             }
 
@@ -193,7 +255,9 @@ def update_market():
         except Exception as e:
 
             market_data = {
+
                 "status": "ERROR",
+
                 "message": str(e)
             }
 
