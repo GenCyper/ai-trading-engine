@@ -15,39 +15,48 @@ SYMBOL = "BTCUSDT"
 
 
 # =========================
-# FETCH BINANCE DATA
+# BYBIT FETCH
 # =========================
 
-def get_klines(interval="1m", limit=100):
+def get_klines(interval="1", limit=100):
 
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={SYMBOL}&interval={interval}&limit={limit}"
+    interval_map = {
+        "1m": "1",
+        "5m": "5",
+        "15m": "15"
+    }
+
+    bybit_interval = interval_map.get(interval, "1")
+
+    url = (
+        f"https://api.bybit.com/v5/market/kline"
+        f"?category=linear"
+        f"&symbol={SYMBOL}"
+        f"&interval={bybit_interval}"
+        f"&limit={limit}"
+    )
 
     response = requests.get(url, timeout=10)
 
     data = response.json()
 
-    # Binance API error protection
-    if not isinstance(data, list):
-        raise Exception(f"Binance API Error: {data}")
+    if data["retCode"] != 0:
+        raise Exception(data["retMsg"])
 
-    if len(data) == 0:
-        raise Exception("Empty candle data")
+    candles = data["result"]["list"]
 
     closes = []
     highs = []
     lows = []
 
-    for k in data:
+    # Bybit trả nến mới nhất trước
+    candles.reverse()
 
-        if len(k) < 5:
-            continue
+    for c in candles:
 
-        closes.append(float(k[4]))
-        highs.append(float(k[2]))
-        lows.append(float(k[3]))
-
-    if len(closes) == 0:
-        raise Exception("No valid candle data")
+        closes.append(float(c[4]))
+        highs.append(float(c[2]))
+        lows.append(float(c[3]))
 
     return closes, highs, lows
 
@@ -141,7 +150,7 @@ def signal_logic(price, ema20, ema50, rsi_value):
 
         signal["reasons"] = [
             "Bullish EMA alignment",
-            "RSI momentum strong"
+            "Strong RSI momentum"
         ]
 
     elif (
@@ -155,7 +164,7 @@ def signal_logic(price, ema20, ema50, rsi_value):
 
         signal["reasons"] = [
             "Bearish EMA alignment",
-            "RSI momentum weak"
+            "Weak RSI momentum"
         ]
 
     return signal
@@ -283,7 +292,7 @@ def update_market():
 
                 "warnings": [
                     "Always use stop loss",
-                    "Do not revenge trade",
+                    "Avoid revenge trade",
                     "Avoid over leverage"
                 ]
             }
@@ -341,4 +350,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=5000
-            )
+    )
